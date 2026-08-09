@@ -19,7 +19,7 @@ from CoolProp.CoolProp import PropsSI
 # ======================================================================
 # Geometry / materials / operating conditions
 # ======================================================================
-Di, Do   = 0.070, 0.078          # m  (70 mm ID, 4 mm wall → Do = 78 mm)
+Di, Do   = 0.020, 0.028          # m  (70 mm ID, 4 mm wall → Do = 78 mm)
 K_CU     = 400.0                 # W/m·K  copper
 K_EFF    = 0.5                   # W/m·K  effective conductivity of dry sand bed including the effects of conduction & radiation at 600 degC
 MDOT, P  = 0.1, 1.0e6            # kg/s, Pa  (10 bar)

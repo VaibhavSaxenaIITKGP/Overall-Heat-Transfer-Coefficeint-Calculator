@@ -1,177 +1,95 @@
 # Overall-Heat-Transfer-Coefficeint-Calculator
 Overall heat transfer coefficient (U) for tubes embedded in a sand packed-bed TES. Combines Gnielinski/Dittus–Boelter (single-phase), Gungor–Winterton + Cooper (flow boiling), radial wall conduction (Incropera), and stagnant-bed sand-side resistance (Nu = 2).
+# Overall Heat Transfer Coefficient for Embedded Tubes in Sand Packed-Bed TES
 
-"""
-Overall heat transfer coefficient U for embedded tubes in a sand packed-bed TES.
+This repository contains a Python script that calculates the **overall heat transfer coefficient (U)** for tubes embedded in a sand packed-bed thermal energy storage (TES) system.
 
-Resistance network (per unit tube length):
-    1/(U*A) = R_i + R_wall + R_sand
-            = 1/(h_i * π * Di) + ln(Do/Di)/(2π k_cu) + 1/(h_sand * π * Do)
+The model is based on a thermal resistance network and evaluates the contribution of:
+- Inner convective heat transfer (water / steam)
+- Tube wall conduction
+- Sand-side heat transfer (stagnant packed bed)
 
-Inner-side h_i is calculated with:
-  - Single-phase (water or steam): Gnielinski / Dittus-Boelter
-  - Flow boiling: Gungor-Winterton (1986) + Cooper pool-boiling term
+---
 
-Requires:  pip install CoolProp numpy pandas
-"""
+## Physical Model
 
-import numpy as np
-import pandas as pd
-from CoolProp.CoolProp import PropsSI
+The overall heat transfer coefficient is calculated from the sum of three thermal resistances (per unit tube length):
 
-# ======================================================================
-# Geometry / materials / operating conditions
-# ======================================================================
-Di, Do   = 0.070, 0.078          # m  (70 mm ID, 4 mm wall → Do = 78 mm)
-K_CU     = 400.0                 # W/m·K  copper
-K_EFF    = 1.5                   # W/m·K  effective conductivity of dry sand bed
-MDOT, P  = 0.1, 1.0e6            # kg/s, Pa  (10 bar)
-FLUID    = "Water"
-M_WATER  = 18.015                # kg/kmol (for Cooper correlation)
+\[
+\frac{1}{U \cdot A} = R_i + R_{\text{wall}} + R_{\text{sand}}
+\]
 
+Where:
 
-# ======================================================================
-# Fluid property helper
-# ======================================================================
-def props(T=None, p=None, Q=None):
-    """Return dict of properties. Use (T,p) for single-phase or (p,Q) for saturation."""
-    out = {}
-    if Q is None:
-        out["rho"] = PropsSI("D", "T", T, "P", p, FLUID)
-        out["mu"]  = PropsSI("V", "T", T, "P", p, FLUID)
-        out["k"]   = PropsSI("L", "T", T, "P", p, FLUID)
-        out["cp"]  = PropsSI("C", "T", T, "P", p, FLUID)
-    else:
-        out["rho"] = PropsSI("D", "P", p, "Q", Q, FLUID)
-        out["mu"]  = PropsSI("V", "P", p, "Q", Q, FLUID)
-        out["k"]   = PropsSI("L", "P", p, "Q", Q, FLUID)
-        out["cp"]  = PropsSI("C", "P", p, "Q", Q, FLUID)
-    out["Pr"] = out["mu"] * out["cp"] / out["k"]
-    return out
+- \( R_i = \dfrac{1}{h_i \pi D_i} \) → Inner convection resistance  
+- \( R_{\text{wall}} = \dfrac{\ln(D_o / D_i)}{2\pi k_{\text{cu}}} \) → Radial conduction through the tube wall  
+- \( R_{\text{sand}} = \dfrac{1}{h_{\text{sand}} \pi D_o} \) → Sand-side resistance  
 
+The sand-side heat transfer coefficient is calculated using the stagnant-bed conduction limit:
 
-# ======================================================================
-# Inner heat-transfer coefficients
-# ======================================================================
-def Re_D(mdot, D, mu):
-    return 4.0 * mdot / (np.pi * D * mu)
+\[
+Nu_{\text{sand}} = 2 \quad \Rightarrow \quad h_{\text{sand}} = \frac{2\, k_{\text{eff}}}{D_o}
+\]
 
+---
 
-def dittus_boelter(Re, Pr, heating=True):
-    n = 0.4 if heating else 0.3
-    return 0.023 * Re**0.8 * Pr**n
+## Inner Heat Transfer Correlations
 
+| Regime                    | Correlation                          | Reference |
+|---------------------------|--------------------------------------|---------|
+| Single-phase liquid/steam | Gnielinski (default) / Dittus–Boelter | Gnielinski (1976), Dittus & Boelter (1930) |
+| Flow boiling              | Gungor–Winterton + Cooper            | Gungor & Winterton (1986), Cooper (1984) |
 
-def gnielinski(Re, Pr):
-    f = (0.79 * np.log(Re) - 1.64)**-2
-    return (f/8) * (Re - 1000) * Pr / (1 + 12.7*(f/8)**0.5 * (Pr**(2/3) - 1))
+Fluid properties are obtained from **CoolProp** using the IAPWS-IF97 formulation for water/steam.
 
+---
 
-def h_single_phase(mdot, D, T, p, correlation="gnielinski"):
-    """h [W/m²K] for single-phase liquid water or superheated steam."""
-    pr = props(T=T, p=p)
-    Re = Re_D(mdot, D, pr["mu"])
-    Nu = gnielinski(Re, pr["Pr"]) if correlation == "gnielinski" else dittus_boelter(Re, pr["Pr"])
-    return Nu * pr["k"] / D, Re, pr["Pr"]
+## Geometry & Operating Conditions (Default)
 
+| Parameter              | Value          | Unit      |
+|------------------------|----------------|-----------|
+| Tube inner diameter    | 70             | mm        |
+| Tube outer diameter    | 78             | mm        |
+| Wall material          | Copper         | –         |
+| Thermal conductivity   | 400            | W/m·K     |
+| Effective sand k       | 1.5            | W/m·K     |
+| Mass flow rate         | 0.1            | kg/s      |
+| Pressure               | 10             | bar       |
 
-def h_gungor_winterton(G, D, p, x, qpp):
-    """
-    Two-phase flow boiling h [W/m²K] – Gungor-Winterton (1986) + Cooper (1984).
-    G   : mass flux [kg/m²s]
-    D   : inner diameter [m]
-    p   : pressure [Pa]
-    x   : vapor quality [-]
-    qpp : wall heat flux [W/m²]
-    """
-    liq  = props(p=p, Q=0)
-    vap  = props(p=p, Q=1)
-    h_fg = PropsSI("H", "P", p, "Q", 1, FLUID) - PropsSI("H", "P", p, "Q", 0, FLUID)
-    pc   = PropsSI("pcrit", FLUID)
+Three characteristic regimes are evaluated:
 
-    Re_l = G * (1 - x) * D / liq["mu"]
-    h_L  = 0.023 * Re_l**0.8 * liq["Pr"]**0.4 * liq["k"] / D
+1. Sensible water heating at 60 °C  
+2. Flow boiling at vapor quality \( x = 0.5 \)  
+3. Superheated steam at 500 °C  
 
-    Bo   = qpp / (G * h_fg)
-    Xtt  = ((1-x)/x)**0.9 * (vap["rho"]/liq["rho"])**0.5 * (liq["mu"]/vap["mu"])**0.1
-    E    = 1 + 24000*Bo**1.16 + 1.37*(1/Xtt)**0.86
-    S    = 1.0 / (1.0 + 1.15e-6 * E**2 * Re_l**1.17)
+---
 
-    pr_red = p / pc
-    h_nb = 55 * pr_red**0.12 * (-np.log10(pr_red))**-0.55 * M_WATER**-0.5 * qpp**0.67
+## Installation
 
-    h_tp = E * h_L + S * h_nb
-    return h_tp, dict(h_L=h_L, E=E, S=S, h_nb=h_nb, Bo=Bo, Xtt=Xtt, Re_l=Re_l)
+```bash
+pip install CoolProp numpy pandas
+
+Usage
+Simply run the script:
+Bashpython overall_U_sand_TES.py
+Output
+The script prints:
+
+A summary table of ( h_i ), ( h_{\text{sand}} ), overall ( U ) (outer area basis), and the percentage contribution of the sand-side resistance for each regime.
+A sensitivity analysis of overall ( U ) with respect to the effective thermal conductivity of the sand bed (( k_{\text{eff}} )).
+A CSV file (overall_U_results.csv) containing the tabulated results.
 
 
-# ======================================================================
-# Overall U (resistance network)
-# ======================================================================
-def R_wall(Do, Di, k_wall=K_CU):
-    """Radial wall conduction resistance per unit length [m·K/W]."""
-    return np.log(Do / Di) / (2 * np.pi * k_wall)
+Key Insight
+For the given geometry and stagnant packed-bed assumption, the sand-side resistance dominates the overall heat transfer. Even under strong flow boiling conditions on the water side, the overall ( U ) remains largely controlled by ( h_{\text{sand}} ).
+Improving the effective thermal conductivity of the sand bed (or enhancing particle movement) has a much larger impact on system performance than further increasing the inner heat transfer coefficient.
 
+References
 
-def h_sand(Do, k_eff=K_EFF):
-    """Sand-side coefficient – stagnant conduction limit (Nu = 2)."""
-    return 2.0 * k_eff / Do
+Dittus, F.W. & Boelter, L.M.K. (1930). Heat Transfer in Automobile Radiators of the Tubular Type.
+Gnielinski, V. (1976). New Equations for Heat and Mass Transfer in Turbulent Pipe and Channel Flow.
+Gungor, K.E. & Winterton, R.H.S. (1986). A general correlation for flow boiling in tubes and annuli. International Journal of Heat and Mass Transfer, 29(3), 351–358.
+Cooper, M.G. (1984). Heat flow rates in saturated nucleate pool boiling – a wide-ranging examination using reduced properties.
+Incropera, F.P. & DeWitt, D.P. – Fundamentals of Heat and Mass Transfer (radial conduction).
+CoolProp: http://www.coolprop.org
 
-
-def overall_U(h_i, Do=Do, Di=Di, k_wall=K_CU, k_eff=K_EFF, basis="outer"):
-    """
-    Return U [W/m²K] on outer- or inner-area basis together with resistance shares.
-    """
-    hs = h_sand(Do, k_eff)
-    Ri = 1.0 / (h_i * np.pi * Di)
-    Rw = R_wall(Do, Di, k_wall)
-    Rs = 1.0 / (hs * np.pi * Do)
-    Rt = Ri + Rw + Rs
-    A  = np.pi * (Do if basis == "outer" else Di)
-    U  = 1.0 / (Rt * A)
-    return U, dict(Ri=Ri, Rw=Rw, Rs=Rs, h_sand=hs,
-                   share_inner=Ri/Rt, share_wall=Rw/Rt, share_sand=Rs/Rt)
-
-
-# ======================================================================
-# Main evaluation
-# ======================================================================
-if __name__ == "__main__":
-    A = np.pi * Di**2 / 4
-    G = MDOT / A
-
-    regimes = {}
-
-    # 1. Sensible water heating (60 °C feedwater)
-    h, _, _ = h_single_phase(MDOT, Di, T=333.15, p=P)
-    regimes["1. Sensible water (60°C)"] = h
-
-    # 2. Flow boiling at x = 0.5, q'' = 3.66 kW/m²
-    h, _ = h_gungor_winterton(G, Di, P, x=0.5, qpp=3.66e3)
-    regimes["2. Flow boiling (x=0.5)"] = h
-
-    # 3. Superheated steam (500 °C, 10 bar)
-    h, _, _ = h_single_phase(MDOT, Di, T=773.15, p=P)
-    regimes["3. Superheated steam (500°C)"] = h
-
-    # ---- Table of U for each regime ----
-    rows = []
-    for name, hi in regimes.items():
-        U, info = overall_U(hi)
-        rows.append(dict(
-            regime=name,
-            h_i=round(hi),
-            h_sand=round(info["h_sand"], 1),
-            U_outer=round(U, 1),
-            sand_share_pct=round(100 * info["share_sand"], 1)
-        ))
-    df = pd.DataFrame(rows)
-    print(df.to_string(index=False))
-
-    # ---- Sensitivity: U vs effective sand conductivity (boiling regime) ----
-    print("\nSensitivity of U (boiling regime) to sand k_eff:")
-    for ke in [0.25, 0.4, 0.6, 1.0, 2.0, 4.0]:
-        U, info = overall_U(regimes["2. Flow boiling (x=0.5)"], k_eff=ke)
-        print(f"  k_eff = {ke:4.2f} W/m·K  →  h_sand = {info['h_sand']:6.1f},  U = {U:6.1f} W/m²K")
-
-    df.to_csv("overall_U_results.csv", index=False)
-    print("\nSaved → overall_U_results.csv")
